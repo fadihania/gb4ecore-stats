@@ -84,10 +84,18 @@ The output is a JSON array. Each item represents one GitHub repository and inclu
     "size": 2098053,
     "model_files": [
       {
-        "model_file_name": "example.ecore",
-        "full_file_url": "https://github.com/owner/name/blob/main/model/example.ecore",
-        "file_size": 15285,
-        "commits": 26
+        "name": "example.ecore",
+        "url": "https://github.com/owner/name/blob/main/model/example.ecore",
+        "size": 15285,
+        "commits": 26,
+        "commit_history": [
+          {
+            "url": "https://github.com/owner/name/blob/abc123/model/example.ecore",
+            "date": "2026-06-16T19:17:44Z",
+            "author": "janedoe",
+            "message": "Update model"
+          }
+        ]
       }
     ],
     "error": null
@@ -96,3 +104,5 @@ The output is a JSON array. Each item represents one GitHub repository and inclu
 ```
 
 If a repository cannot be fetched, the collector keeps the repository entry and model files, leaves unavailable stats as `null`, and writes the failure message to `error`.
+
+Each model file includes `commit_history`, ordered from newest to oldest. If commit history cannot be collected for a specific model file, the collector keeps the file entry, writes an empty `commit_history` array, and adds `commit_history_error`.

@@ -7,17 +7,24 @@ import com.fasterxml.jackson.databind.SerializationFeature;
 import org.apache.commons.csv.CSVFormat;
 import org.apache.commons.csv.CSVParser;
 import org.apache.commons.csv.CSVRecord;
+import org.kohsuke.github.GHBranch;
+import org.kohsuke.github.GHCommit;
 import org.kohsuke.github.GHIssue;
 import org.kohsuke.github.GHIssueState;
 import org.kohsuke.github.GHRepository;
+import org.kohsuke.github.GHUser;
 import org.kohsuke.github.GitHub;
 import org.kohsuke.github.GitHubBuilder;
 
 import java.io.IOException;
 import java.io.Reader;
+import java.net.URI;
+import java.net.URLDecoder;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -92,9 +99,10 @@ public final class App {
 
         try {
             GHRepository repository = github.getRepository(repositoryInput.repoName());
+            Map<String, GHBranch> branches = repository.getBranches();
             stats.stars = repository.getStargazersCount();
             stats.forks = repository.getForksCount();
-            stats.branches = repository.getBranches().size();
+            stats.branches = branches.size();
             stats.languages = repository.listLanguages();
             stats.contributors = repository.listContributors().toList().size();
             stats.issues = new IssueStats(repository.getOpenIssueCount(), countTotalIssues(repository));
@@ -102,6 +110,7 @@ public final class App {
             stats.createdAt = repository.getCreatedAt().toString();
             stats.updatedAt = repository.getUpdatedAt().toString();
             stats.size = repository.getSize();
+            collectModelFileHistories(repository, branches, stats.modelFiles);
         } catch (IOException | RuntimeException e) {
             stats.error = e.getMessage();
         }
@@ -120,6 +129,76 @@ public final class App {
             }
         }
         return total;
+    }
+
+    private static void collectModelFileHistories(
+            GHRepository repository,
+            Map<String, GHBranch> branches,
+            List<ModelFile> modelFiles
+    ) {
+        for (ModelFile modelFile : modelFiles) {
+            try {
+                FileReference fileReference = parseFileReference(modelFile.fullFileUrl, branches);
+                modelFile.commitHistory = collectCommitHistory(repository, fileReference);
+            } catch (IOException | RuntimeException e) {
+                modelFile.commitHistory = List.of();
+                modelFile.commitHistoryError = e.getMessage();
+            }
+        }
+    }
+
+    private static FileReference parseFileReference(String fullFileUrl, Map<String, GHBranch> branches) {
+        String path = URLDecoder.decode(URI.create(fullFileUrl).getPath(), StandardCharsets.UTF_8);
+        String marker = "/blob/";
+        int markerIndex = path.indexOf(marker);
+        if (markerIndex < 0) {
+            throw new IllegalArgumentException("GitHub file URL does not contain /blob/: " + fullFileUrl);
+        }
+
+        String refAndPath = path.substring(markerIndex + marker.length());
+        for (String branchName : branches.keySet().stream()
+                .sorted(Comparator.comparingInt(String::length).reversed())
+                .toList()) {
+            String prefix = branchName + "/";
+            if (refAndPath.startsWith(prefix)) {
+                return new FileReference(branchName, refAndPath.substring(prefix.length()));
+            }
+        }
+
+        int slashIndex = refAndPath.indexOf('/');
+        if (slashIndex < 0) {
+            throw new IllegalArgumentException("GitHub file URL does not include a file path: " + fullFileUrl);
+        }
+        return new FileReference(refAndPath.substring(0, slashIndex), refAndPath.substring(slashIndex + 1));
+    }
+
+    private static List<CommitHistoryEntry> collectCommitHistory(GHRepository repository, FileReference fileReference)
+            throws IOException {
+        List<CommitHistoryEntry> commits = new ArrayList<>();
+        for (GHCommit commit : repository.queryCommits()
+                .from(fileReference.ref())
+                .path(fileReference.path())
+                .pageSize(100)
+                .list()) {
+            var shortInfo = commit.getCommitShortInfo();
+            GHUser githubAuthor = commit.getAuthor();
+            commits.add(new CommitHistoryEntry(
+                    buildFileAtCommitUrl(repository, commit.getSHA1(), fileReference.path()),
+                    shortInfo.getAuthoredDate() == null ? null : shortInfo.getAuthoredDate().toString(),
+                    githubAuthor == null ? null : githubAuthor.getLogin(),
+                    shortInfo.getMessage()
+            ));
+        }
+
+        commits.sort(Comparator.comparing(
+                (CommitHistoryEntry commit) -> commit.date() == null ? "" : commit.date(),
+                Comparator.reverseOrder()
+        ));
+        return commits;
+    }
+
+    private static String buildFileAtCommitUrl(GHRepository repository, String sha, String filePath) {
+        return repository.getHtmlUrl() + "/blob/" + sha + "/" + filePath;
     }
 
     private static int countTotalPullRequests(GHRepository repository) {
@@ -183,12 +262,32 @@ public final class App {
     record RepositoryInput(String repoName, String url, List<ModelFile> modelFiles) {
     }
 
-    record ModelFile(
-            @JsonProperty("model_file_name") String modelFileName,
-            @JsonProperty("full_file_url") String fullFileUrl,
-            @JsonProperty("file_size") long fileSize,
-            long commits
-    ) {
+    static final class ModelFile {
+        @JsonProperty("name")
+        public final String modelFileName;
+        @JsonProperty("url")
+        public final String fullFileUrl;
+        @JsonProperty("size")
+        public final long fileSize;
+        public final long commits;
+        @JsonProperty("commit_history")
+        public List<CommitHistoryEntry> commitHistory = List.of();
+        @JsonInclude(JsonInclude.Include.NON_NULL)
+        @JsonProperty("commit_history_error")
+        public String commitHistoryError;
+
+        ModelFile(String modelFileName, String fullFileUrl, long fileSize, long commits) {
+            this.modelFileName = modelFileName;
+            this.fullFileUrl = fullFileUrl;
+            this.fileSize = fileSize;
+            this.commits = commits;
+        }
+    }
+
+    record FileReference(String ref, String path) {
+    }
+
+    record CommitHistoryEntry(String url, String date, String author, String message) {
     }
 
     record IssueStats(int open, int total) {
